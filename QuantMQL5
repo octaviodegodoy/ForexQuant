@@ -1,0 +1,119 @@
+#include <Trade\Trade.mqh>
+#include <Math\Stat\Stat.mqh>
+
+CTrade trade;
+
+// Function to get data
+datetime GetData(string symbol, ENUM_TIMEFRAMES timeframe, int n, int start, double &prices[]) {
+   datetime times[];
+   if (CopyRates(symbol, timeframe, start, n, times, prices) > 0) {
+      return times[0];
+   }
+   return 0;
+}
+
+// Function to check cointegration
+double CheckCointegration(string symbolY, string symbolX, int start, double &hedge_ratio) {
+   double pricesY[], pricesX[];
+   GetData(symbolY, PERIOD_D1, 60, start, pricesY);
+   GetData(symbolX, PERIOD_D1, 60, start, pricesX);
+   
+   double indep[], dep[];
+   ArrayResize(indep, ArraySize(pricesX));
+   ArrayResize(dep, ArraySize(pricesY));
+   
+   for (int i = 0; i < ArraySize(pricesX); i++) {
+      indep[i] = pricesX[i];
+      dep[i] = pricesY[i];
+   }
+   
+   double lr_params[2];
+   LinearRegression(indep, dep, 2, lr_params);
+   hedge_ratio = lr_params[1];
+   
+   double spread[];
+   ArrayResize(spread, ArraySize(dep));
+   for (int i = 0; i < ArraySize(dep); i++) {
+      spread[i] = dep[i] - hedge_ratio * indep[i];
+   }
+   
+   double adf_result = AdfTest(spread);
+   return adf_result;
+}
+
+// Function to execute trade
+bool ExecuteTrade(string symbol, double volume, ENUM_ORDER_TYPE type) {
+   trade.SetType(type);
+   trade.SetSymbol(symbol);
+   trade.SetVolume(volume);
+   return trade.Send();
+}
+
+// Function to adjust volume
+void VolumeAdjust(string symbolY, string symbolX, double hedge_ratio, double &volumeY, double &volumeX) {
+   double minLotY = SymbolInfoDouble(symbolY, SYMBOL_VOLUME_MIN);
+   double minLotX = SymbolInfoDouble(symbolX, SYMBOL_VOLUME_MIN);
+   
+   double leverage = AccountInfoDouble(ACCOUNT_LEVERAGE);
+   double totalInvestment = AccountInfoDouble(ACCOUNT_EQUITY) / leverage;
+   
+   double investmentY = totalInvestment * MathAbs(hedge_ratio);
+   double investmentX = totalInvestment - investmentY;
+   
+   volumeY = MathMax(minLotY * investmentY, minLotY);
+   volumeX = MathMax(minLotX * investmentX, minLotX);
+   
+   volumeY = NormalizeDouble(volumeY, 2);
+   volumeX = NormalizeDouble(volumeX, 2);
+   
+   PrintFormat("Proportion %s volume amount is %f and %s volume amount is %f with hedge ratio %f", symbolY, volumeY, symbolX, volumeX, hedge_ratio);
+}
+
+// Main function
+void OnStart() {
+   while (true) {
+      if (CheckTradingTime()) {
+         double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+         double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+         double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+         double originalMargin = AccountInfoDouble(ACCOUNT_MARGIN);
+         int totalPositions = PositionsTotal();
+         
+         if (totalPositions > 0) {
+            for (int i = 0; i < totalPositions; i++) {
+               ulong ticket = PositionGetTicket(i);
+               string symbol = PositionGetString(POSITION_SYMBOL);
+               double price = PositionGetDouble(POSITION_PRICE_OPEN);
+               if (StringFind(PositionGetString(POSITION_COMMENT), "independent") >= 0) {
+                  TrailingStop(ticket, symbol, price, POSITION_TYPE_BUY);
+               } else if (StringFind(PositionGetString(POSITION_COMMENT), "dependent") >= 0) {
+                  TrailingStop(ticket, symbol, price, POSITION_TYPE_SELL);
+               }
+            }
+            
+            double hedge_ratio;
+            double adf_result = CheckCointegration("EURUSD", "USDJPY", 0, hedge_ratio);
+            
+            double z_scores[];
+            double half_life;
+            double state_means[];
+            double hedge_ratio;
+            GenerateRegression("EURUSD", "USDJPY", 0, z_scores, half_life, state_means, hedge_ratio);
+            
+            ProcessStrategy("EURUSD", "USDJPY", 1.5, z_scores, hedge_ratio);
+         } else if (totalPositions == 0) {
+            string symbolY, symbolX;
+            double slope, state_mean, zscore;
+            if (VerifyPairs(1.5, 0.9, symbolY, symbolX, slope, state_mean, zscore)) {
+               ProcessStrategy(symbolY, symbolX, 1.5, zscore, slope);
+            } else {
+               Print("No pairs found");
+            }
+         }
+      } else {
+         CloseAllPositions();
+      }
+      
+      Sleep(10000);
+   }
+}
