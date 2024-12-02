@@ -53,7 +53,7 @@ def check_cointegration(symbolY,symbolX,start):
     # Step 3: Run the Augmented Dickey-Fuller test on the spread
     adf_result = adfuller(spread)
 
-    return adf_result, hedge_ratio
+    return adf_result
 
 # Get historical data
 def generate_regression(symbolY,symbolX, start):
@@ -65,11 +65,8 @@ def generate_regression(symbolY,symbolX, start):
     'close_y': df_Y['close'].pct_change().dropna(),  # Daily returns for dependent
     'close_x': df_X['close'].pct_change().dropna()  # Daily returns for independent
     }).dropna()
-    
-    print(f"Volatility asset {symbolY} {data['close_y'][-1:]}")
-    print(f"Volatility asset {symbolX} {data['close_x'][-1:]}")
-    
-     # Step 3.1: Perform linear regression to find the hedge ratio
+
+    # Step 3.1: Perform linear regression to find the hedge ratio
     X = np.vstack([np.ones(len(data['close_y'])), data['close_y']]).T
     model = OLS(data['close_x'], X).fit()
     hedge_ratio = model.params[1]
@@ -280,8 +277,8 @@ def execute_trade_short_short(symbolY,symbolX,slope):
         print(f" order_send done, {result_short_independent} and {result_short_dependent} ")
         
 def verify_pairs(min_zscore, half_life_max):
-     major_pairs_y = ["WDOZ24"]
-     major_pairs_x = ["WINZ24"]
+     major_pairs_y = ["USDCHF","GBPUSD","USDJPY","AUDNZD","EURCAD","CHFJPY","AUDCHF","CADCHF","GBPCHF","EURCHF","NZDCAD","EURMXN"] #["WDOX24"] #["WDOX24"]
+     major_pairs_x = ["CADJPY","AUDJPY","GBPJPY","AUDUSD","EURAUD","EURUSD","AUDJPY","CADJPY","USDMXN","EURJPY","NZDJPY","SP500"] #["WINZ24"] #["WINZ24"]
 
      print(f"Selecting pairs with min z score {min_zscore} and half life {half_life_max} ")
      
@@ -294,17 +291,16 @@ def verify_pairs(min_zscore, half_life_max):
                     spread_y = mt5.symbol_info(major_pairs_y[i]).spread
                     spread_x = mt5.symbol_info(major_pairs_x[j]).spread
 
-                    is_spread_allowed = True # (spread_y <= max_spread) and (spread_x <= max_spread)
+                    is_spread_allowed = True #(spread_y <= max_spread) and (spread_x <= max_spread)
                     
-                    adf_result, slope = check_cointegration(major_pairs_y[i],major_pairs_x[j],0)
+                    adf_result = check_cointegration(major_pairs_y[i],major_pairs_x[j],0)
                     p_value = adf_result[1]                                    
 
-                    is_stationary = True
+                    is_stationary = p_value < 0.05
 
                     if not (is_spread_allowed and is_stationary):
                             continue
                     
-                    #print("Slope ", slope)
                     #print(f"Dependente {major_pairs_y[i]} e independente {major_pairs_x[j]}")
                     z_scores,half_life,state_means,hedge_ratio = generate_regression(major_pairs_y[i],major_pairs_x[j],0)
                     volume_adjust(major_pairs_y[i],major_pairs_x[j], hedge_ratio)
@@ -317,7 +313,7 @@ def verify_pairs(min_zscore, half_life_max):
                     #plot_values(z_scores,state_means,half_life,major_pairs_y[i],major_pairs_x[j])
                     #print(f" Half life {half_life} e  max half life {half_life_max}")   
                     if (abs(z_score) > min_zscore and half_life < half_life_max ):
-                        return major_pairs_y[i], major_pairs_x[j], hedge_ratio, state_mean, z_score
+                        return major_pairs_y[i], major_pairs_x[j], slope, state_mean, z_score
     
      return None, None, None, None, None
 
@@ -384,26 +380,29 @@ def plot_values(z_scores,state_means,half_life,symbol_y,symbol_x):
         plt.show()
 
 def volume_adjust(symbolY,symbolX,hedge_ratio):
-  
-  min_lot_Y = mt5.symbol_info(symbolY).volume_min
-  min_lot_X = mt5.symbol_info(symbolX).volume_min
-  
-  equity = mt5.account_info().equity
-  total_investment = equity/1500
+   
 
-  # Adjust lot sizes based on volatility
-  investment_asset_y = total_investment*abs(hedge_ratio)
-  investment_asset_x = total_investment - investment_asset_y  
-  
-  volume_y = investment_asset_y
-  volume_x = investment_asset_x
-  
-  volume_y = float(math.floor(investment_asset_y))
-  volume_x = float(math.floor(investment_asset_x))
-  
-  print(f"hedge ratio {hedge_ratio} volume {symbolY} is {volume_y} and for {symbolX} is {volume_x}")
-  
-  return volume_y,volume_x
+    min_lot_Y = mt5.symbol_info(symbolY).volume_min
+    min_lot_X = mt5.symbol_info(symbolX).volume_min
+
+    leverage = mt5.account_info().leverage
+
+    # Total investment amount
+    total_investment = mt5.account_info().equity/leverage # Example amount
+
+    # Adjust lot sizes based on volatility
+    investment_asset_y = total_investment*abs(hedge_ratio)
+    investment_asset_x = total_investment - investment_asset_y
+
+    volume_y = max(min_lot_Y*(investment_asset_y),min_lot_Y)
+    volume_x = max(min_lot_X*(investment_asset_x),min_lot_X)
+
+    volume_y = round(volume_y,2)
+    volume_x = round(volume_x,2)
+    
+    print(f"Proportion {symbolY} volume amount is {volume_y} and {symbolX} volume amount is {volume_x} with hedge ratio {hedge_ratio} ")
+
+    return volume_y,volume_x
 
 def close_all_positions():
     # Get all open positions
@@ -528,9 +527,9 @@ def check_trading_time():
    
 
 def is_close_trading_time():
-  before_end = trading_time_end.replace(hour=22, minute=8, second=0, microsecond=0)
-  now = datetime.now()
-  time_to_close = datetime.now() > before_end
+  before_end = trading_time_end - timedelta(minutes=5)
+  now = datetime.now(timezone.utc)
+  time_to_close = now > before_end
   
   return time_to_close
 
@@ -571,9 +570,9 @@ max_risk = 0.065
 max_grids = 4
 stop_loss = 0.80
 take_profit = 0.80
-grid_distance = 0.30
+grid_distance = 0.25
 stop_offset = 0.05
-min_z_score = 1.10
+min_z_score = 1.5
 additional_grid = 0.20
 min_kalman = 0.60
 half_life_max = 0.9
@@ -583,15 +582,14 @@ volume = 5  # Volume for trading
 periods = 60
 # Trailing stop parameters
 TRAILING_DISTANCE_POINTS = 30
-PROFIT_THRESHOLD = 420  # BRL
+PROFIT_THRESHOLD = 10.0  # USD
 
 today = datetime.now(timezone.utc)
 
-trading_time_start = today.replace(hour=12, minute=2, second=0, microsecond=0)
-trading_time_end = trading_time_start + timedelta(hours=4,minutes=50)
+trading_time_start = today.replace(hour=4, minute=0, second=0, microsecond=0)
+trading_time_end = trading_time_start + timedelta(hours=15,minutes=0)
 trade_time = check_trading_time()
-print(f"UTC Time start {trading_time_start}")
-print(f"UTC Time end {trading_time_end}")
+print(f"Trade time end {trading_time_end} Trade time ? {trade_time}")
 
 while True:
 
@@ -636,7 +634,6 @@ while True:
                   print(f"Aplicando trailing para {open_position_y} {open_position_y}")
                   trailing_stop(open_position_y,type_position_y,price_current_y,stop_loss_y,ticket_y)
                   
-                  
           if not (open_position_x is None or open_position_y is None):        
                   
             #volume_adjust(open_position_y,open_position_x)
@@ -644,7 +641,10 @@ while True:
             adf_result, slope = check_cointegration(open_position_y,open_position_x,0)
 
             z_scores,half_life,state_means,hedge_ratio = generate_regression(open_position_y,open_position_x,0)
-            #plot_values(z_scores,state_means,half_life,open_position_y,open_position_x)     
+            #plot_values(z_scores,state_means,half_life,open_position_y,open_position_x)
+
+          
+      
   
             current_kalman = state_means[-1:][0][0]
             z_score = z_scores[periods-1]
